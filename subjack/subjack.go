@@ -1,7 +1,9 @@
 package subjack
 
 import (
+	"bufio"
 	"log"
+	"os"
 	"sync"
 )
 
@@ -14,49 +16,68 @@ type Options struct {
 	Ssl          bool
 	All          bool
 	Verbose      bool
-	Config       string
 	Manual       bool
-	Fingerprints []Fingerprints
+	CheckNS      bool
+	CheckAR      bool
+	CheckAXFR    bool
+	CheckMail    bool
+	ResolverList string
+	Stdin        bool
+	fingerprints []Fingerprint
+	resolvers    []string
+	sem          chan struct{}
 }
 
-type Subdomain struct {
-	Url string
-}
-
-/* Start processing subjack from the defined options. */
 func Process(o *Options) {
 	var list []string
 	var err error
 
-	urls := make(chan *Subdomain, o.Threads*10)
-	
-	if(len(o.Domain) > 0){
+	if len(o.Domain) > 0 {
 		list = append(list, o.Domain)
-	} else {
-		list, err = open(o.Wordlist)
+	} else if o.Wordlist != "" {
+		list, err = readLines(o.Wordlist)
+		if err != nil {
+			log.Fatalln(err)
+		}
 	}
-		
-	if err != nil {
-		log.Fatalln(err)
-	}
-	
-	o.Fingerprints = fingerprints(o.Config)
 
+	o.fingerprints = loadFingerprints()
+
+	if o.Output != "" {
+		initOutput(o.Output)
+	}
+
+	if o.ResolverList != "" {
+		o.resolvers, err = readLines(o.ResolverList)
+		if err != nil {
+			log.Fatalln(err)
+		}
+	}
+
+	o.sem = make(chan struct{}, o.Threads)
+
+	urls := make(chan string, o.Threads*10)
 	wg := new(sync.WaitGroup)
 
 	for i := 0; i < o.Threads; i++ {
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			for url := range urls {
-				url.dns(o)
+				check(url, o)
 			}
-
-			wg.Done()
 		}()
 	}
 
-	for i := 0; i < len(list); i++ {
-		urls <- &Subdomain{Url: list[i]}
+	if o.Stdin {
+		scanner := bufio.NewScanner(os.Stdin)
+		for scanner.Scan() {
+			urls <- scanner.Text()
+		}
+	} else {
+		for _, u := range list {
+			urls <- u
+		}
 	}
 
 	close(urls)
